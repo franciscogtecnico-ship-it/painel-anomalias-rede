@@ -1,0 +1,177 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+from io import BytesIO
+
+# 1. Configuração da página (Deve ser o primeiro comando)
+st.set_page_config(page_title="Meu Dashboard BI", layout="wide")
+
+# 2. Inserir o Logotipo na Barra Lateral
+try:
+    st.sidebar.image('image_3576ef.png', use_container_width=True)
+except FileNotFoundError:
+    st.sidebar.warning("Logotipo não encontrado. Verifique se a imagem está na mesma pasta.")
+
+# 3. Título da página
+st.title("📊 Painel de Indicadores (BI) - Manutenção da Rede")
+st.markdown("---")
+
+# 4. Carregar o banco de dados do Excel
+@st.cache_data
+def carregar_dados():
+    df_principal = pd.read_excel('Anomalias.xlsm', sheet_name='Anomalias')
+    df_plano = pd.read_excel('Anomalias.xlsm', sheet_name='PLANO')
+    
+    df_principal.columns = df_principal.columns.str.strip()
+    df_plano.columns = df_plano.columns.str.strip()
+    
+    df_principal['Número da OS'] = df_principal['Número da OS'].astype(str)
+    df_plano['OS'] = df_plano['OS'].astype(str)
+    
+    # Garantir que Latitude e Longitude são números (caso o Excel tenha lido como texto)
+    df_principal['Latitude'] = pd.to_numeric(df_principal['Latitude'], errors='coerce')
+    df_principal['Longitude'] = pd.to_numeric(df_principal['Longitude'], errors='coerce')
+    
+    df_completo = pd.merge(df_principal, df_plano, left_on='Número da OS', right_on='OS', how='left')
+    df_completo['EQUIPAMENTO'] = df_completo['EQUIPAMENTO'].fillna('Sem Equipamento Vinculado')
+    
+    return df_completo
+
+df = carregar_dados()
+
+# 5. Criar barra lateral para os filtros
+st.sidebar.header("Filtros")
+
+lista_subestacao = df['Subestação'].dropna().unique()
+lista_alimentador = df['Alimentador'].dropna().unique()
+lista_os = df['Número da OS'].dropna().unique()
+lista_equipamento = df['EQUIPAMENTO'].dropna().unique()
+
+sub_selecionada = st.sidebar.multiselect("1. Selecione a Subestação:", options=lista_subestacao)
+alim_selecionado = st.sidebar.multiselect("2. Selecione o Alimentador:", options=lista_alimentador)
+os_selecionada = st.sidebar.multiselect("3. Selecione o Número da OS:", options=lista_os)
+equip_selecionado = st.sidebar.multiselect("4. Selecione o Equipamento:", options=lista_equipamento)
+
+df_filtrado = df.copy()
+
+if sub_selecionada:
+    df_filtrado = df_filtrado[df_filtrado['Subestação'].isin(sub_selecionada)]
+if alim_selecionado:
+    df_filtrado = df_filtrado[df_filtrado['Alimentador'].isin(alim_selecionado)]
+if os_selecionada:
+    df_filtrado = df_filtrado[df_filtrado['Número da OS'].isin(os_selecionada)]
+if equip_selecionado:
+    df_filtrado = df_filtrado[df_filtrado['EQUIPAMENTO'].isin(equip_selecionado)]
+
+# 6. Cálculos para os Indicadores
+total_registos = len(df_filtrado)
+contagem_subestacao = df_filtrado['Subestação'].value_counts().reset_index()
+contagem_subestacao.columns = ['Subestação', 'Quantidade de Anomalias']
+contagem_anomalias = df_filtrado['Anomalia'].value_counts().reset_index()
+contagem_anomalias.columns = ['Descrição da Anomalia', 'Quantidade']
+
+# 7. Criar os "Cards" de Indicadores (KPIs)
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric(label="Total de Anomalias (Filtro Atual)", value=total_registos)
+with col2:
+    st.metric(label="Tipos de Anomalias Diferentes", value=len(contagem_anomalias))
+with col3:
+    equipamentos_afetados = df_filtrado[df_filtrado['EQUIPAMENTO'] != 'Sem Equipamento Vinculado']['EQUIPAMENTO'].nunique()
+    st.metric(label="Equipamentos Afetados", value=equipamentos_afetados)
+
+st.markdown("---")
+
+# ==========================================
+# 8. LINHA 1 (AGORA COM GRÁFICO E MAPA LADO A LADO)
+# ==========================================
+col_equip, col_mapa = st.columns(2)
+
+with col_equip:
+    st.subheader("Anomalias por Equipamento (Status)")
+    if not df_filtrado.empty:
+        df_equip = df_filtrado[df_filtrado['EQUIPAMENTO'] != 'Sem Equipamento Vinculado']
+        if not df_equip.empty:
+            contagem_equip_status = df_equip.groupby(['EQUIPAMENTO', 'Status']).size().reset_index(name='Quantidade')
+            fig_equip = px.bar(
+                contagem_equip_status, x='Quantidade', y='EQUIPAMENTO', color='Status',
+                orientation='h'
+            )
+            fig_equip.update_layout(yaxis={'categoryorder':'total ascending'}, barmode='stack')
+            st.plotly_chart(fig_equip, use_container_width=True)
+        else:
+            st.info("Não há equipamentos vinculados aos dados filtrados atualmente.")
+    else:
+        st.info("Nenhuma anomalia encontrada.")
+
+with col_mapa:
+    st.subheader("Geolocalização das Anomalias")
+    # Filtra apenas as linhas que têm Latitude e Longitude válidas
+    df_mapa = df_filtrado.dropna(subset=['Latitude', 'Longitude'])
+    
+    if not df_mapa.empty:
+        # Criação do mapa interativo
+        fig_mapa = px.scatter_mapbox(
+            df_mapa, 
+            lat="Latitude", 
+            lon="Longitude", 
+            hover_name="Anomalia", # Título ao passar o rato
+            hover_data=["Número da OS", "EQUIPAMENTO", "Status"], # Informações extra ao passar o rato
+            color="Status", # Define a cor do ponto com base no Status
+            zoom=10, 
+            height=400
+        )
+        # Estilo de mapa gratuito que não exige chave de API
+        fig_mapa.update_layout(mapbox_style="open-street-map")
+        fig_mapa.update_layout(margin={"r":0,"t":0,"l":0,"b":0})
+        st.plotly_chart(fig_mapa, use_container_width=True)
+    else:
+        st.info("Nenhuma coordenada válida encontrada para esta seleção.")
+
+st.markdown("---")
+
+# ==========================================
+# 9. LINHA 2 (SUBESTAÇÃO E TABELA)
+# ==========================================
+col_grafico1, col_grafico2 = st.columns(2)
+
+with col_grafico1:
+    st.subheader("Anomalias por Subestação")
+    if not contagem_subestacao.empty:
+        fig_barras = px.bar(
+            contagem_subestacao, x='Quantidade de Anomalias', y='Subestação', 
+            orientation='h', color='Subestação'
+        )
+        fig_barras.update_layout(yaxis={'categoryorder':'total ascending'}, showlegend=False)
+        st.plotly_chart(fig_barras, use_container_width=True)
+    else:
+        st.info("Nenhuma anomalia encontrada.")
+
+with col_grafico2:
+    st.subheader("Tabela Resumo - Top 15 Anomalias")
+    st.dataframe(contagem_anomalias.head(15), use_container_width=True)
+
+st.markdown("---")
+
+# ==========================================
+# 10. EXPORTAR PARA EXCEL E VISUALIZAR DADOS
+# ==========================================
+st.subheader("Exportar e Visualizar Dados")
+
+@st.cache_data
+def converter_para_excel(df):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Anomalias Filtradas')
+    return output.getvalue()
+
+excel_file = converter_para_excel(df_filtrado)
+
+st.download_button(
+    label="📥 Baixar Tabela Filtrada (Excel)",
+    data=excel_file,
+    file_name='Relatorio_Anomalias_Filtrado.xlsx',
+    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+)
+
+st.dataframe(df_filtrado)
